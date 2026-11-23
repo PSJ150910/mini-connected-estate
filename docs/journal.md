@@ -272,9 +272,3 @@ wsl --status
 
 ---
 
-### 7. Still to do for Module 0
-- [ ] Check the README in a private browser window
-- [ ] LinkedIn: headline, About, Projects section, project announcement post
-
-### 8. Coming later (not dropped, after day 10)
-PostgreSQL with TimescaleDB, live MQTT sensor stream, web 3D viewer, MCP server with document search, Isolation Forest early-warning model, Quarto report.
