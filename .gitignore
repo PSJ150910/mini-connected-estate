@@ -1,0 +1,15 @@
+# Virtual environment (rebuilt from pyproject.toml and uv.lock)
+.venv/
+
+# Python cache files
+__pycache__/
+*.pyc
+
+# Secrets: passwords and API keys never go to GitHub
+.env
+
+# Jupyter notebook autosaves
+.ipynb_checkpoints/
+
+# Windows clutter
+Thumbs.db
