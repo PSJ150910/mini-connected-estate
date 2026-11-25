@@ -13,3 +13,5 @@ __pycache__/
 
 # Windows clutter
 Thumbs.db
+data/twin.db
+data/processed/

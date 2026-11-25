@@ -13,7 +13,11 @@ dependencies = [
     "matplotlib>=3.11.2",
     "numpy>=2.5.5",
     "pandas>=3.1.1",
+    "pypdf>=7.1.1",
+    "rapidfuzz>=3.14.6",
     "reportlab>=5.1.0",
+    "sqlalchemy",
+    "sqlmodel>=0.0.50",
 ]
 
 [project.scripts]
@@ -27,3 +31,6 @@ build-backend = "uv_build"
 dev = [
     "ruff>=0.17.6",
 ]
+
+[tool.uv.sources]
+sqlalchemy = { url = "https://files.pythonhosted.org/packages/7a/ee/9926603a1f7e88b41bc0d1e068e889fc84981553fb4e6037426d6b174da3/sqlalchemy-2.1.9-py3-none-any.whl" }
