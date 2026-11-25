@@ -1,0 +1,17 @@
+# Docker Compose: describes the "containers" (mini computers) our project needs.
+# Start with:  docker compose up -d      Stop with:  docker compose down
+services:
+  db:
+    image: timescale/timescaledb:latest-pg17   # PostgreSQL 17 + TimescaleDB, ready-made
+    container_name: twin-db
+    environment:
+      POSTGRES_USER: twin
+      POSTGRES_PASSWORD: twin_local_only   # fine on your laptop, never use on a real server
+      POSTGRES_DB: twin
+    ports:
+      - "5432:5432"   # laptop port : container port
+    volumes:
+      - twin-data:/var/lib/postgresql/data   # keeps the data when the container stops
+
+volumes:
+  twin-data:
