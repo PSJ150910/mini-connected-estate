@@ -8,6 +8,8 @@ The score (in quality_report.py) is then just "how many rows passed".
 This file only READS data. It never changes the database.
 """
 
+from datetime import UTC, datetime
+
 import pandas as pd
 import pandera.pandas as pa
 from sqlalchemy import text
@@ -185,3 +187,189 @@ def check_work_orders_valid(work_orders):
         [row not in problems for row in work_orders.index],
         [problems.get(row, "") for row in work_orders.index],
     )
+
+
+# ---------------------------------------------------------------
+# 3. UNIQUE: no duplicates
+# ---------------------------------------------------------------
+def check_duplicate_assets(assets):
+    """UNIQ-01: no two assets with the same type and name in the same room."""
+    key = ["asset_type", "name", "room_id"]
+    is_copy = assets.duplicated(subset=key, keep=False)  # keep=False marks BOTH copies
+    return result(
+        assets["building_id"],
+        assets["id"],
+        ~is_copy,
+        is_copy.map({True: "same type, name and room as another asset", False: ""}),
+    )
+
+
+def check_duplicate_jobs(work_orders):
+    """UNIQ-02: the same problem on the same thing is not logged twice within 1 day."""
+    jobs = work_orders.copy()
+    jobs["thing"] = jobs["asset_id"].fillna(jobs["room_id"])
+    jobs = jobs.sort_values(["thing", "problem", "raised"])
+    gap = jobs.groupby(["thing", "problem"])["raised"].diff()  # time since the last one
+    is_repeat = gap <= pd.Timedelta(days=1)
+    return result(
+        jobs["building_id"],
+        jobs["id"],
+        ~is_repeat,
+        is_repeat.map({True: "same problem raised again within 1 day", False: ""}),
+    )
+
+
+# ---------------------------------------------------------------
+# 5. TIMELY: data is still arriving, papers are in date
+# ---------------------------------------------------------------
+def silent_periods(readings):
+    """Every gap between two readings of the same sensor that is longer than 2 hours."""
+    readings = readings.sort_values(["sensor_id", "timestamp"])
+    gap = readings.groupby("sensor_id")["timestamp"].diff()
+    found = readings[gap > MAX_SILENCE].assign(
+        silent_from=readings["timestamp"] - gap, hours=gap.dt.total_seconds() / 3600
+    )
+    return found[["sensor_id", "building_id", "silent_from", "timestamp", "hours"]]
+
+
+def check_sensor_silence(readings):
+    """TIME-01: no sensor is silent for more than 2 hours (inside the export period)."""
+    gaps = silent_periods(readings)
+    worst = gaps.groupby("sensor_id")["hours"].max()
+    sensors = readings[["sensor_id", "building_id"]].drop_duplicates()
+    hours = sensors["sensor_id"].map(worst)
+    detail = [
+        f"silent for {h:.1f} hours" if pd.notna(h) else "" for h in hours
+    ]
+    return result(sensors["building_id"], sensors["sensor_id"], hours.isna(), detail)
+
+
+def flat_periods(readings):
+    """Every run of the SAME value lasting longer than 6 hours (a frozen sensor)."""
+    readings = readings[readings["measure"].isin(FLAT_MEASURES)]
+    readings = readings.sort_values(["sensor_id", "timestamp"])
+    # A new 'run' starts whenever the value changes (or the sensor changes)
+    changed = (readings["value"] != readings.groupby("sensor_id")["value"].shift())
+    readings = readings.assign(run=changed.cumsum())
+    runs = readings.groupby(["sensor_id", "building_id", "run"]).agg(
+        value=("value", "first"),
+        start=("timestamp", "min"),
+        end=("timestamp", "max"),
+        n=("value", "size"),
+    )
+    runs["hours"] = runs["n"] * EXPECTED_STEP.total_seconds() / 3600
+    long_runs = runs[runs["hours"] > MAX_FLAT.total_seconds() / 3600]
+    return long_runs.reset_index().drop(columns="run")
+
+
+def check_flat_sensors(readings):
+    """TIME-02: no temperature or CO2 sensor shows the same value for over 6 hours."""
+    flat = flat_periods(readings)
+    sensors = readings.loc[
+        readings["measure"].isin(FLAT_MEASURES), ["sensor_id", "building_id"]
+    ].drop_duplicates()
+    first = flat.groupby("sensor_id").first()
+    detail = [
+        f"stuck at {first.at[s, 'value']} from {first.at[s, 'start']:%d %b %H:%M} "
+        f"for {first.at[s, 'hours']:.0f} hours"
+        if s in first.index
+        else ""
+        for s in sensors["sensor_id"]
+    ]
+    return result(
+        sensors["building_id"],
+        sensors["sensor_id"],
+        ~sensors["sensor_id"].isin(flat["sensor_id"]),
+        detail,
+    )
+
+
+def check_certificates(documents, today=None):
+    """TIME-03: no certificate is past its 'next inspection due' date.
+    Manuals have no due date, so they are not checked."""
+    today = today or datetime.now(UTC)
+    certs = documents[documents["next_due"].notna()]
+    expired = certs["next_due"] < pd.Timestamp(today)
+    detail = [
+        f"expired on {d:%d %b %Y}" if e else f"valid until {d:%d %b %Y}"
+        for d, e in zip(certs["next_due"], expired)
+    ]
+    return result(
+        certs["building_id"], certs["id"] + " (" + certs["entity_id"] + ")", ~expired, detail
+    )
+
+
+# ---------------------------------------------------------------
+# 6. CONSISTENT: the data agrees with itself and with other sources
+# ---------------------------------------------------------------
+def check_night_cooling(readings):
+    """CONS-01: room temperature agrees with the heating timetable.
+    The heating is off at night, so the 1am-5am average should be below 20 C."""
+    temps = readings[readings["measure"] == "ZoneTemp"]
+    night = temps[temps["timestamp"].dt.hour.between(1, 4)]
+    per_night = night.groupby(
+        ["sensor_id", "building_id", night["timestamp"].dt.date]
+    )["value"].mean()
+    hot = per_night[per_night > NIGHT_MAX_TEMP].reset_index()
+    hot_count = hot.groupby("sensor_id").size()
+    first_hot = hot.groupby("sensor_id")["timestamp"].min()
+    sensors = temps[["sensor_id", "building_id"]].drop_duplicates()
+    counts = sensors["sensor_id"].map(hot_count).fillna(0).astype(int)
+    detail = [
+        f"{c} warm nights, first on {first_hot[s]:%d %b}" if c else ""
+        for s, c in zip(sensors["sensor_id"], counts)
+    ]
+    return result(
+        sensors["building_id"], sensors["sensor_id"], counts <= MAX_HOT_NIGHTS, detail
+    )
+
+
+def check_assets_have_certificates(assets, documents):
+    """CONS-02: every asset the law cares about (boiler, lift ...) has a document."""
+    must = assets[assets["asset_type"].isin(NEEDS_CERTIFICATE)]
+    has_doc = must["id"].isin(documents["entity_id"])
+    return result(
+        must["building_id"],
+        must["id"],
+        has_doc,
+        has_doc.map({True: "", False: "no certificate found"}),
+    )
+
+
+# ---------------------------------------------------------------
+# 7. THE LIST OF ALL CHECKS (the report runs every one of these)
+# ---------------------------------------------------------------
+CHECKS = [
+    # (id, dimension, rule in plain English, function that needs the data)
+    ("COMP-01", "complete", "Every sensor sends at least 98% of its readings",
+     lambda d: check_sensor_completeness(d["readings"])),
+    ("COMP-02", "complete", "Every completed job has a finish date and a cost",
+     lambda d: check_completed_jobs(d["work_orders"])),
+    ("UNIQ-01", "unique", "No asset is listed twice",
+     lambda d: check_duplicate_assets(d["assets"])),
+    ("UNIQ-02", "unique", "No job is logged twice within 1 day",
+     lambda d: check_duplicate_jobs(d["work_orders"])),
+    ("VALID-01", "valid", "Every reading is physically possible",
+     lambda d: check_reading_ranges(d["readings"])),
+    ("VALID-02", "valid", "Every job has a proper ID, priority, status, cost and clear dates",
+     lambda d: check_work_orders_valid(d["work_orders"])),
+    ("TIME-01", "timely", "No sensor is silent for more than 2 hours",
+     lambda d: check_sensor_silence(d["readings"])),
+    ("TIME-02", "timely", "No temperature or CO2 sensor is stuck for over 6 hours",
+     lambda d: check_flat_sensors(d["readings"])),
+    ("TIME-03", "timely", "No certificate is past its expiry date",
+     lambda d: check_certificates(d["documents"])),
+    ("CONS-01", "consistent", "Rooms cool below 20 C at night when the heating is off",
+     lambda d: check_night_cooling(d["readings"])),
+    ("CONS-02", "consistent", "Every boiler, calorifier, board, fire panel and lift has a certificate",
+     lambda d: check_assets_have_certificates(d["assets"], d["documents"])),
+]  # fmt: skip
+
+
+def run_all_checks(data):
+    """Run every check and stack the answers into one big table."""
+    tables = []
+    for check_id, dimension, rule, function in CHECKS:
+        found = function(data)
+        tables.append(found.assign(check_id=check_id, dimension=dimension, rule=rule))
+    return pd.concat(tables, ignore_index=True)

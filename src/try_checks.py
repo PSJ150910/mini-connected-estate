@@ -1,28 +1,23 @@
-"""Try the checks one by one and look at the problems they find.
+"""Run ALL the checks and show every problem they find.
 
 Run with:  uv run python src/try_checks.py
 """
 
 from sqlmodel import create_engine
 
-from quality_checks import (
-    check_completed_jobs,
-    check_reading_ranges,
-    check_sensor_completeness,
-    check_work_orders_valid,
-    load_data,
-)
+from quality_checks import load_data, run_all_checks
 
 engine = create_engine("sqlite:///data/twin.db")
 data = load_data(engine)
-print(f"Loaded {len(data['readings']):,} readings and {len(data['work_orders'])} jobs\n")
+results = run_all_checks(data)
 
-for name, found in [
-    ("COMP-01 sensor completeness", check_sensor_completeness(data["readings"])),
-    ("COMP-02 completed jobs", check_completed_jobs(data["work_orders"])),
-    ("VALID-01 reading ranges", check_reading_ranges(data["readings"])),
-    ("VALID-02 work orders valid", check_work_orders_valid(data["work_orders"])),
-]:
-    failed = found[~found["passed"]]
-    print(f"{name}: {len(found)} checked, {len(failed)} failed")
-    print(failed.head(3).to_string(index=False), "\n")
+summary = results.groupby(["check_id", "rule"])["passed"].agg(
+    checked="size", passed="sum"
+)
+summary["failed"] = summary["checked"] - summary["passed"]
+print(summary.to_string(), "\n")
+
+# Show the problems from the new checks of Lesson 3
+new_checks = ["UNIQ-01", "UNIQ-02", "TIME-01", "TIME-02", "TIME-03", "CONS-01", "CONS-02"]
+problems = results[~results["passed"] & results["check_id"].isin(new_checks)]
+print(problems[["check_id", "building_id", "item", "detail"]].to_string(index=False))
