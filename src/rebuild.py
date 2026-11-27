@@ -11,6 +11,8 @@ STEPS = [
     "match_ids.py",  # 2. messy names -> official IDs
     "load_database.py",  # 3. ETL into data/twin.db
     "score_matching.py",  # 4. mark the matching against the answer key
+    "audit.py",  # 5. start the audit log (Module 3)
+    "quality_report.py",  # 6. data trust checks and scores (Module 3)
 ]
 
 for step in STEPS:

@@ -1,6 +1,6 @@
 """The digital twin API: a "menu" of web addresses that other programs can call.
 
-Run with:   uv run uvicorn api:app --app-dir src --reload
+Run with:   uv run python -m uvicorn api:app --app-dir src --reload
 Then open:  http://127.0.0.1:8000/docs   (FastAPI builds this page for you)
 
 By default it reads data/twin.db (SQLite). To use PostgreSQL in Docker instead:
@@ -12,6 +12,8 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException
+from fastapi.responses import RedirectResponse
+from sqlalchemy import text
 from sqlmodel import Session, create_engine, desc, select
 
 from models import (
@@ -154,7 +156,66 @@ def resolve_name(name: str, session: SessionDep):
     if not matches:
         raise HTTPException(status_code=404, detail=f"Never seen the name '{name}'")
     return matches
-from fastapi.responses import RedirectResponse
+
+
+# ---------------------------------------------------------------
+# MODULE 3: data trust (quality report and audit log)
+# ---------------------------------------------------------------
+def rows(session, query, **params):
+    """Run plain SQL and return a list of dictionaries (FastAPI turns them into JSON)."""
+    result = session.connection().execute(text(query), params)
+    return [dict(row._mapping) for row in result]
+
+
+@app.get("/quality")
+def quality_overview(session: SessionDep):
+    """Data quality score (0-100) for every building, from the last quality_report.py run."""
+    scores = rows(session, "SELECT * FROM quality_score ORDER BY building_id, check_id")
+    buildings = {}
+    for row in scores:
+        buildings.setdefault(row["building_id"], []).append(row["score"])
+    return {
+        "checked_at": scores[0]["checked_at"] if scores else None,
+        "buildings": {b: round(sum(s) / len(s), 1) for b, s in buildings.items()},
+        "checks": scores,
+    }
+
+
+@app.get("/quality/{building_id}")
+def quality_for_building(building_id: str, session: SessionDep):
+    """Score, check results and every problem found for one building."""
+    checks = rows(
+        session, "SELECT * FROM quality_score WHERE building_id = :b", b=building_id
+    )
+    if not checks:
+        raise HTTPException(status_code=404, detail=f"No quality report for {building_id}")
+    return {
+        "building_id": building_id,
+        "score": round(sum(c["score"] for c in checks) / len(checks), 1),
+        "checks": checks,
+        "issues": rows(
+            session,
+            "SELECT check_id, item, detail FROM quality_issue WHERE building_id = :b",
+            b=building_id,
+        ),
+    }
+
+
+@app.get("/audit-log")
+def audit_log(
+    session: SessionDep,
+    table: str | None = None,
+    record_id: str | None = None,
+    limit: int = 50,
+):
+    """Who changed what, when and why. Newest first. Filter by table or record."""
+    query = "SELECT * FROM audit_log WHERE 1 = 1"
+    if table:
+        query += " AND table_name = :table"
+    if record_id:
+        query += " AND record_id = :record_id"
+    query += " ORDER BY id DESC LIMIT :limit"
+    return rows(session, query, table=table, record_id=record_id, limit=limit)
 
 
 @app.get("/", include_in_schema=False)
